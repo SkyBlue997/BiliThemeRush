@@ -268,11 +268,27 @@ func orderCreate(itemId int, addMonth int, buyNum int64, csrf string, apiCookie 
 		return "", fmt.Errorf("下单请求失败: %w", err)
 	}
 
-	log.Println("下单响应:", string(respb))
+	// 改进响应日志显示
+	responseStr := string(respb)
+	if len(responseStr) > 500 {
+		log.Printf("下单响应前500字符: %s...", responseStr[:500])
+	} else {
+		log.Printf("下单响应: %s", responseStr)
+	}
 
 	// 检查响应状态
 	code, err := jsonparser.GetInt(respb, "code")
-	if err != nil || code != 0 {
+	if err != nil {
+		log.Printf("解析下单响应码失败: %v", err)
+		log.Printf("响应内容长度: %d", len(respb))
+		// 尝试检查是否是HTML响应
+		if len(respb) > 0 && respb[0] == '<' {
+			log.Println("响应似乎是HTML格式，可能是错误页面")
+		}
+		return "", fmt.Errorf("解析下单响应失败: %w", err)
+	}
+
+	if code != 0 {
 		msg, _ := jsonparser.GetString(respb, "message")
 		return "", fmt.Errorf("下单失败，错误码: %d, 消息: %s", code, msg)
 	}
@@ -610,17 +626,26 @@ func getTimedPurchaseTime() time.Time {
 	}
 
 	input = strings.TrimSpace(input)
-	targetTime, err := time.Parse("2006-01-02 15:04:05", input)
+
+	// 使用本地时区解析时间
+	targetTime, err := time.ParseInLocation("2006-01-02 15:04:05", input, time.Local)
 	if err != nil {
 		fmt.Printf("时间格式错误: %v\n", err)
 		fmt.Println("请使用格式：2006-01-02 15:04:05 （例如：2024-01-01 12:00:00）")
 		return getTimedPurchaseTime()
 	}
 
-	if targetTime.Before(time.Now()) {
+	now := time.Now()
+	if targetTime.Before(now) {
 		fmt.Println("目标时间不能早于当前时间")
+		fmt.Printf("当前时间: %s\n", now.Format("2006-01-02 15:04:05"))
+		fmt.Printf("输入时间: %s\n", targetTime.Format("2006-01-02 15:04:05"))
 		return getTimedPurchaseTime()
 	}
+
+	// 显示时区信息
+	fmt.Printf("目标时间: %s (%s)\n", targetTime.Format("2006-01-02 15:04:05"), targetTime.Location())
+	fmt.Printf("当前时间: %s (%s)\n", now.Format("2006-01-02 15:04:05"), now.Location())
 
 	return targetTime
 }
