@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"compress/gzip"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -145,6 +146,8 @@ func setCommonHeaders(req *http.Request, userAgent string) {
 	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
 	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("Pragma", "no-cache")
 }
 
 // 设置支付请求头
@@ -173,7 +176,19 @@ func doRequest(req *http.Request) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body) // 使用新的API替代ioutil.ReadAll
+	var reader io.Reader = resp.Body
+
+	// 检查是否是gzip压缩的响应
+	if resp.Header.Get("Content-Encoding") == "gzip" {
+		gzipReader, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("创建gzip读取器失败: %w", err)
+		}
+		defer gzipReader.Close()
+		reader = gzipReader
+	}
+
+	body, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, fmt.Errorf("读取响应失败: %w", err)
 	}
@@ -374,7 +389,21 @@ func watchTargetId(itemId int, targetId int64, limitV int64, buyNum *int64) bool
 	userAgent := "Mozilla/5.0 (Linux; Android 12; SM-G975F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 BiliApp/7.49.0"
 
 	for {
-		req, err := http.NewRequest("GET", fmt.Sprintf("https://api.bilibili.com/x/garb/mall/item/suit/v2?item_id=%d&part=suit", itemId), nil)
+		// 构建API请求参数
+		params := map[string]string{
+			"item_id": strconv.Itoa(itemId),
+			"part":    "suit",
+			"ts":      strconv.FormatInt(time.Now().Unix(), 10),
+		}
+
+		// 添加签名
+		sign := signParams(params, AppKey, AppSecret)
+
+		// 构建URL
+		apiURL := fmt.Sprintf("https://api.bilibili.com/x/garb/mall/item/suit/v2?item_id=%d&part=suit&ts=%s&appkey=%s&sign=%s",
+			itemId, params["ts"], AppKey, sign)
+
+		req, err := http.NewRequest("GET", apiURL, nil)
 		if err != nil {
 			log.Printf("创建请求失败: %v", err)
 			time.Sleep(2 * time.Second)
@@ -383,6 +412,7 @@ func watchTargetId(itemId int, targetId int64, limitV int64, buyNum *int64) bool
 
 		setCommonHeaders(req, userAgent)
 		req.Header.Set("Referer", "https://www.bilibili.com/")
+		req.Header.Set("Origin", "https://www.bilibili.com")
 
 		respb, err := doRequestWithRetry(req)
 		if err != nil {
@@ -391,43 +421,93 @@ func watchTargetId(itemId int, targetId int64, limitV int64, buyNum *int64) bool
 			continue
 		}
 
+		// 打印响应内容用于调试（仅前200字符）
+		responseStr := string(respb)
+		if len(responseStr) > 200 {
+			log.Printf("API响应前200字符: %s...", responseStr[:200])
+		} else {
+			log.Printf("API响应: %s", responseStr)
+		}
+
 		SuitRecentResultCode, err := jsonparser.GetInt(respb, "code")
 		if err != nil {
 			log.Printf("解析响应码失败: %v", err)
-			log.Printf("响应内容: %s", string(respb))
-			time.Sleep(2 * time.Second)
-			continue
+			log.Printf("尝试使用备用API...")
+
+			// 尝试使用备用API
+			backupURL := fmt.Sprintf("https://api.bilibili.com/x/garb/mall/item/detail?item_id=%d", itemId)
+			backupReq, err := http.NewRequest("GET", backupURL, nil)
+			if err != nil {
+				log.Printf("创建备用请求失败: %v", err)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
+			setCommonHeaders(backupReq, userAgent)
+			backupReq.Header.Set("Referer", "https://www.bilibili.com/")
+
+			respb, err = doRequestWithRetry(backupReq)
+			if err != nil {
+				log.Printf("备用请求失败: %v", err)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
+			log.Printf("备用API响应: %s", string(respb))
+
+			SuitRecentResultCode, err = jsonparser.GetInt(respb, "code")
+			if err != nil {
+				log.Printf("备用API也解析失败: %v", err)
+				time.Sleep(2 * time.Second)
+				continue
+			}
 		}
 
 		if SuitRecentResultCode != 0 {
 			msg, _ := jsonparser.GetString(respb, "message")
 			log.Printf("API返回错误，错误码: %d, 消息: %s", SuitRecentResultCode, msg)
-			log.Printf("响应内容: %s", string(respb))
 			time.Sleep(2 * time.Second)
 			continue
 		}
 
-		saleQuantity, err := jsonparser.GetString(respb, "data", "item", "properties", "sale_quantity")
+		// 尝试多种路径获取销售数量
+		var saleQuantity string
+		var saleQuantityI int64
+		var saleSurplus int64
+
+		// 路径1: data.item.properties.sale_quantity
+		saleQuantity, err = jsonparser.GetString(respb, "data", "item", "properties", "sale_quantity")
 		if err != nil {
-			log.Printf("获取销售数量失败: %v", err)
-			log.Printf("响应内容: %s", string(respb))
-			time.Sleep(2 * time.Second)
-			continue
+			// 路径2: data.properties.sale_quantity
+			saleQuantity, err = jsonparser.GetString(respb, "data", "properties", "sale_quantity")
+			if err != nil {
+				// 路径3: data.sale_quantity
+				saleQuantity, err = jsonparser.GetString(respb, "data", "sale_quantity")
+				if err != nil {
+					log.Printf("获取销售数量失败，尝试所有路径都失败: %v", err)
+					time.Sleep(2 * time.Second)
+					continue
+				}
+			}
 		}
 
-		saleQuantityI, err := strconv.ParseInt(saleQuantity, 10, 64)
+		saleQuantityI, err = strconv.ParseInt(saleQuantity, 10, 64)
 		if err != nil {
 			log.Printf("解析销售数量失败: %v", err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
 
-		saleSurplus, err := jsonparser.GetInt(respb, "data", "sale_surplus")
+		// 尝试多种路径获取剩余数量
+		saleSurplus, err = jsonparser.GetInt(respb, "data", "sale_surplus")
 		if err != nil {
-			log.Printf("获取剩余数量失败: %v", err)
-			log.Printf("响应内容: %s", string(respb))
-			time.Sleep(2 * time.Second)
-			continue
+			// 备用路径
+			saleSurplus, err = jsonparser.GetInt(respb, "data", "item", "sale_surplus")
+			if err != nil {
+				log.Printf("获取剩余数量失败: %v", err)
+				time.Sleep(2 * time.Second)
+				continue
+			}
 		}
 
 		nowId := saleQuantityI - saleSurplus
