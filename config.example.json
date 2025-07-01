@@ -1,0 +1,22 @@
+{
+  "bp_enough": true,
+  "buy_num": "1",
+  "coupon_token": "",
+  "device": "android",
+  "item_id": "装扮ID",
+  "time_before": 30,
+  "cookies": {
+    "SESSDATA": "你的SESSDATA",
+    "bili_jct": "你的bili_jct",
+    "DedeUserID": "你的DedeUserID",
+    "DedeUserID__ckMd5": "你的DedeUserID__ckMd5"
+  },
+  "target_mode": {
+    "target_id": 999,
+    "limit_v": 1000,
+    "buy_num": 1
+  },
+  "timed_mode": {
+    "buy_num": 1
+  }
+} 
